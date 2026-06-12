@@ -1,0 +1,86 @@
+*&---------------------------------------------------------------------*
+*& Include Z_PARSE_TR_SD_TOP
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+* Sub-task row (E070/E071 join projection)
+*&---------------------------------------------------------------------*
+TYPES: BEGIN OF gty_subtask,
+         trkorr   TYPE trkorr,
+         pgmid    TYPE e071-pgmid,
+         object   TYPE e071-object,
+         obj_name TYPE e071-obj_name,
+       END OF gty_subtask,
+       gtt_subtask TYPE STANDARD TABLE OF gty_subtask WITH DEFAULT KEY.
+
+*&---------------------------------------------------------------------*
+* A "part" of a unit (one source-code chunk: globals or code)
+*&---------------------------------------------------------------------*
+TYPES: BEGIN OF ty_source_part,
+         name   TYPE string, " include / method / FM identifier
+         role   TYPE string, " 'GLOBAL' or 'CODE'
+         source TYPE string, " full ABAP source of this part
+       END OF ty_source_part,
+       tt_source_parts TYPE STANDARD TABLE OF ty_source_part WITH DEFAULT KEY.
+
+*&---------------------------------------------------------------------*
+* One emitted unit (CLAS / METH_GROUP / ODATA / FUGR / FUGR_GROUP)
+*&---------------------------------------------------------------------*
+TYPES: BEGIN OF gty_unit,
+         trkorr      TYPE trkorr,
+         unit_type   TYPE string,      " CLAS / METH_GROUP / ODATA / FUGR / FUGR_GROUP
+         object_name TYPE string,
+         parent      TYPE string,
+         parts       TYPE tt_source_parts,
+         json        TYPE string,      " serialized payload
+       END OF gty_unit,
+       gtt_units TYPE STANDARD TABLE OF gty_unit WITH DEFAULT KEY.
+
+TYPES: BEGIN OF ty_child_unit,
+         child      TYPE progname,
+         in_tr_child TYPE bool,
+       END OF ty_child_unit,
+       tt_child_unit TYPE STANDARD TABLE OF ty_child_unit WITH DEFAULT KEY.
+
+TYPES: BEGIN OF ty_master_unit,
+         master       TYPE master,
+         child_table  TYPE tt_child_unit,
+         in_tr_master TYPE bool,
+       END OF ty_master_unit,
+       tt_master_unit TYPE STANDARD TABLE OF ty_master_unit WITH DEFAULT KEY.
+
+*&---------------------------------------------------------------------*
+* CLASS grouping (LIMU METH bucketed under their class)
+*&---------------------------------------------------------------------*
+TYPES: BEGIN OF ty_class_methods,
+         class_name TYPE seoclsname,
+         methods    TYPE STANDARD TABLE OF seocpdname WITH DEFAULT KEY,
+       END OF ty_class_methods,
+       tt_class_methods TYPE STANDARD TABLE OF ty_class_methods WITH DEFAULT KEY.
+
+*&---------------------------------------------------------------------*
+* SEO compo helper
+*&---------------------------------------------------------------------*
+TYPES: t_seocompo TYPE STANDARD TABLE OF seocompo WITH DEFAULT KEY.
+
+*&---------------------------------------------------------------------*
+* FUNCTION GROUP grouping (LIMU FUNC + LIMU REPS bucketed under FUGR)
+*&---------------------------------------------------------------------*
+TYPES: BEGIN OF ty_fugr_group,
+         group_name TYPE rs38l-area,
+         funcs      TYPE STANDARD TABLE OF rs38l_fnam WITH DEFAULT KEY,
+         reps       TYPE STANDARD TABLE OF progname WITH DEFAULT KEY,
+       END OF ty_fugr_group,
+       tt_fugr_groups TYPE STANDARD TABLE OF ty_fugr_group WITH DEFAULT KEY.
+
+*&---------------------------------------------------------------------*
+* Custom-include row from D010INC INNER JOIN REPOSRC (cnam <> 'SAP')
+*&---------------------------------------------------------------------*
+TYPES: BEGIN OF ty_inc_row,
+         INCLUDE TYPE progname,
+       END OF ty_inc_row,
+       tt_inc_rows TYPE STANDARD TABLE OF ty_inc_row WITH DEFAULT KEY.
+
+TYPES: BEGIN OF ty_llm_request,
+         prompt  TYPE string,
+         payload TYPE string,
+       END OF ty_llm_request.
