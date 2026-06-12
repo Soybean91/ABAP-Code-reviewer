@@ -1,0 +1,83 @@
+*----------------------------------------------------------------------*
+* Include  Z_PARSE_TR_SD_PROMPTS_NAMING
+*----------------------------------------------------------------------*
+* Local class lcl_prompts_naming - naming convention LLM prompt.
+* EDIT ONLY THIS INCLUDE when tuning the naming prompt.
+*
+* Editing rules:
+*  * One APPEND statement = one logical line of the prompt.
+*  * Long lines are split into chunks joined by && across multiple
+*    physical source lines (each chunk under ~135 chars).
+*  * Single quotes inside text are escaped as '' (doubled).
+*  * Pipes |, braces { } and backticks ` pass through verbatim.
+*  * Blank lines are kept as APPEND '' TO lt_lines.
+*----------------------------------------------------------------------*
+
+CLASS lcl_prompts_naming DEFINITION FINAL CREATE PRIVATE.
+
+  PUBLIC SECTION.
+    CLASS-METHODS get_naming_review_prompt
+      IMPORTING iv_trkorr         TYPE trkorr OPTIONAL
+      RETURNING VALUE(rv_prompt) TYPE string.
+
+  PRIVATE SECTION.
+    CONSTANTS c_nl TYPE c LENGTH 2 VALUE cl_abap_char_utilities=>cr_lf.
+
+ENDCLASS.
+
+CLASS lcl_prompts_naming IMPLEMENTATION.
+
+  METHOD get_naming_review_prompt.
+
+    DATA lt_lines TYPE string_table.
+
+    APPEND 'You are a Senior SAP ABAP Developer performing a naming convention review.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND 'You will receive a JSON unit with a "parts" array. Each part has a "name", "role" (CODE or GLOBAL), and "source" (raw ABAP).' TO lt_lines.
+    APPEND '- CODE parts: review against the naming rules below.' TO lt_lines.
+    APPEND '- GLOBAL parts: use only as context to resolve declarations. Never raise findings on them.' TO lt_lines.
+    APPEND '- If a TR is provided under ## TR, only review lines marked with that TR '
+      && '(Begin/End blocks or inline (+)/(-) markers). If no markers exist, review '
+      && 'entire CODE part.' TO lt_lines.
+    APPEND '- You MUST review ALL parts where role = ''CODE''. Process every CODE part '
+      && 'fully before producing any output. Do not stop after the first CODE part.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND 'Naming Rules:' TO lt_lines.
+    APPEND '- Local variables:      lv_ prefix (e.g. lv_count, lv_name).' TO lt_lines.
+    APPEND '- Local internal tables: lt_ prefix (e.g. lt_orders).' TO lt_lines.
+    APPEND '- Local structures:      ls_ prefix (e.g. ls_order).' TO lt_lines.
+    APPEND '- Local constants:       lc_ prefix (e.g. lc_max_lines).' TO lt_lines.
+    APPEND '- Importing parameters:  iv_ prefix for values, is_ for structures, it_ for tables.' TO lt_lines.
+    APPEND '- Exporting parameters:  ev_ prefix for values, es_ for structures, et_ for tables.' TO lt_lines.
+    APPEND '- Changing parameters:   cv_ prefix for values, cs_ for structures, ct_ for tables.' TO lt_lines.
+    APPEND '- Returning parameters:  rv_ prefix for values, rs_ for structures, rt_ for tables.' TO lt_lines.
+    APPEND '- Field symbols:         <fs_...> or <lfs_...> pattern (e.g. <fs_order>).' TO lt_lines.
+    APPEND '- Global variables:      g_ prefix (e.g. g_total, gt_items).' TO lt_lines.
+    APPEND '- All names must be descriptive - single-letter or meaningless names (e.g. x, tmp, wa, flag) are violations.' TO lt_lines.
+    APPEND '- Method names must describe their action clearly (e.g. get_open_items not process1).' TO lt_lines.
+    APPEND '- Form/subroutine names must be descriptive and use underscores as word separators.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    Append '- Before reporting finding for each code part check if all 13 rules are checked for each code part'  to lt_lines.
+    APPEND 'Do not produce findings for a CODE part until all rules are confirmed for that part.' TO lt_lines.
+    APPEND 'For each CODE part, output its findings before moving to the next.' TO lt_lines.
+    APPEND 'For each finding output one line:' TO lt_lines.
+    APPEND '[PART: <name>] [LINE: <n>] [TYPE: Naming] <exact code quote> -> <short description and fix>' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND '- Only report violations backed by an exact code quote from a CODE part.' TO lt_lines.
+    APPEND '- Do not report on commented-out code.' TO lt_lines.
+    APPEND '- Line numbers reset to 1 at the start of each CODE part.' TO lt_lines.
+    APPEND '- If no issues found across all CODE parts, output: No issues found.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND '## TR' TO lt_lines.
+
+    CONCATENATE LINES OF lt_lines INTO rv_prompt SEPARATED BY c_nl.
+
+    IF iv_trkorr IS NOT INITIAL.
+      REPLACE FIRST OCCURRENCE OF '## TR'
+        IN rv_prompt
+        WITH |## TR { c_nl }{ iv_trkorr }|.
+    ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.
