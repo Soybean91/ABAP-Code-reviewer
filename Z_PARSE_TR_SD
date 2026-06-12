@@ -1,0 +1,21 @@
+*&---------------------------------------------------------------------*
+*& Report Z_PARSE_TR_SD
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT z_parse_tr_sd.
+
+INCLUDE z_parse_tr_sd_ui.
+INCLUDE z_parse_tr_sd_top.
+INCLUDE Z_PARSE_TR_SD_PROMPTS_LITE.
+INCLUDE Z_PARSE_TR_SD_PROMPTS_NAMING.
+INCLUDE z_parse_tr_cl. " Local class definition + implementation
+
+INITIALIZATION.
+DATA: go_app TYPE REF TO lcl_app. " forward reference; defined in CL include
+
+START-OF-SELECTION.
+
+go_app = NEW lcl_app( ).
+DATA(t_units) = go_app->extract( p_trkorr ).
+go_app->review_and_display( ).
