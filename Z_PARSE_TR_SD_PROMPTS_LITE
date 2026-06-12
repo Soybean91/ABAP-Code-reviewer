@@ -1,0 +1,73 @@
+CLASS lcl_prompts DEFINITION FINAL CREATE PRIVATE.
+
+  PUBLIC SECTION.
+    CLASS-METHODS get_code_review_prompt
+      IMPORTING iv_trkorr         TYPE trkorr OPTIONAL
+      RETURNING VALUE(rv_prompt) TYPE string.
+
+  PRIVATE SECTION.
+    CONSTANTS c_nl TYPE c LENGTH 2 VALUE cl_abap_char_utilities=>cr_lf.
+
+ENDCLASS.
+
+CLASS lcl_prompts IMPLEMENTATION.
+
+  METHOD get_code_review_prompt.
+
+    DATA lt_lines TYPE string_table.
+
+    APPEND 'You are a Senior SAP ABAP Developer performing a code review.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND 'You will receive a JSON unit with a "parts" array. Each part has a "name", "role" (CODE or GLOBAL), and ' &&
+           '"source" (raw ABAP).' TO lt_lines.
+    APPEND '- CODE parts: review against the rules below.' TO lt_lines.
+    APPEND '- GLOBAL parts: context only - never raise findings on them.' TO lt_lines.
+    APPEND '- If a TR is provided under ## TR, only review lines marked with that TR number ' &&
+           '(Begin/End blocks or inline (+)/(-) markers). If no markers exist, review the entire CODE part.' TO lt_lines.
+    APPEND '- You must review all parts where role = ''CODE''.Process every CODE part in the parts array '
+            && ' fully before producing any output.Do not stop after the first CODE part.' to lt_lines.
+    APPEND '- For each CODE part , output its findings before moving to the next.'  to lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND 'Rules:' TO lt_lines.
+    APPEND '- Select: Atleast 1 key field of the driver table MUST appear in WHERE clause.' TO lt_lines.
+    APPEND '- Select index: Where fields must match the intended Primary or Secondary index; ' &&
+           'comment above SELECT must state which index is used.' TO lt_lines.
+    APPEND '- All IMPORTING parameters of RFC/method calls must be populated before the call.' TO lt_lines.
+    APPEND '- Avoid unnecessary intermediate variables; suggest inline expressions (VALUE(), COND #(), REDUCE #()) ' &&
+           'where applicable.' TO lt_lines.
+    APPEND '- Data loss in loops: flag variables assigned each iteration without being collected.' TO lt_lines.
+    APPEND '- DELETE ADJACENT DUPLICATES: preceding SORT keys must exactly match COMPARING keys in the same order.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND '- Binary SEARCH: must be preceded by a SORT on the same keys in the same order.' TO lt_lines.
+    APPEND '- Field symbols: must be UNASSIGN-ed after use.' TO lt_lines.
+    APPEND '- Range variables: must be checked IS INITIAL before use in SELECT WHERE.' TO lt_lines.
+    APPEND '- Global variables: must be CLEARED before first use.' TO lt_lines.
+    APPEND '- No hardcoded strings; use named constants.' TO lt_lines.
+    APPEND '- Unused declared variables must be flagged.' TO lt_lines.
+    APPEND '- Variable scope: a variable set in one branch (IF/ELSEIF/WHEN) must not be read ' &&
+           'in another branch where it may be uninitialised.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND '- Check if all rules are checked for each code part' TO lt_lines.
+    Append '- Do not produce findings for a code part until all rules are confirmed for that part' to lt_lines.
+    Append '- Before reporting finding for each code part check if all 13 rules are checked for each code part'  to lt_lines.
+    APPEND 'For each finding output one line:' TO lt_lines.
+    APPEND '[PART: <name>] [LINE: <n>] [TYPE: Coding] <exact code quote> -> <short description and fix>' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND '- Only report violations backed by an exact code quote from a CODE part.' TO lt_lines.
+    APPEND '- Do NOT report on commented-out code.' TO lt_lines.
+    APPEND '- Line numbers reset to 1 at the start of each CODE part.' TO lt_lines.
+    APPEND '- If no issues found across all CODE parts, output: No issues found.' TO lt_lines.
+    APPEND '' TO lt_lines.
+    APPEND '## TR' TO lt_lines.
+
+    CONCATENATE LINES OF lt_lines INTO rv_prompt SEPARATED BY c_nl.
+
+    IF iv_trkorr IS NOT INITIAL.
+      REPLACE FIRST OCCURRENCE OF '## TR'
+              IN rv_prompt
+              WITH |## TR{ c_nl }{ iv_trkorr }|.
+    ENDIF.
+
+  ENDMETHOD.
+
+ENDCLASS.
