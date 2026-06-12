@@ -1,0 +1,18 @@
+*&---------------------------------------------------------------------*
+*& Include          Z_PARSE_TR_SD_UI
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*& Purpose : Selection screen parameters
+*&---------------------------------------------------------------------*
+
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
+
+PARAMETERS:
+  p_trkorr TYPE trkorr OBLIGATORY DEFAULT 'A4HK900116'. " Transport Request
+PARAMETERS: p_url TYPE string LOWER CASE obligatory
+                     DEFAULT 'http://10.10.0.78:1234/v1/chat/completions',
+            p_model TYPE string LOWER CASE obligatory
+                     DEFAULT 'openai/gpt-oss-20b'.
+
+SELECTION-SCREEN END OF BLOCK b1.
+
