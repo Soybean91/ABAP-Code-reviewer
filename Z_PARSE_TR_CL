@@ -1,0 +1,690 @@
+*&---------------------------------------------------------------------*
+*& Include Z_PARSE_TR_CL
+*&---------------------------------------------------------------------*
+*& Purpose : Local class definition and implementation
+*&           Parses a Transport Request and extracts R3TR PROG source
+*&           units for downstream LLM consumption, then displays
+*&           the LLM code review response in an ALV grid.
+*&
+*& SELECTION-SCREEN parameters expected in the MAIN program:
+*&   PARAMETERS: p_trkorr TYPE trkorr OBLIGATORY,
+*&               p_url    TYPE string LOWER CASE
+*&                        DEFAULT 'http://10.10.10.254:5643/v1/chat/completions',
+*&               p_model  TYPE string LOWER CASE
+*&                        DEFAULT 'gpt-oss'.
+*&---------------------------------------------------------------------*
+
+*----------------------------------------------------------------------*
+* ALV output structures
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_alv_coding,
+         trkorr         TYPE trkorr,
+         unit_type      TYPE string,
+         object_name    TYPE string,
+         reviewed_parts TYPE string,
+         finding        TYPE string,
+       END OF ty_alv_coding,
+       tt_alv_coding TYPE STANDARD TABLE OF ty_alv_coding WITH DEFAULT KEY.
+
+TYPES: BEGIN OF ty_alv_naming,
+         trkorr         TYPE trkorr,
+         unit_type      TYPE string,
+         object_name    TYPE string,
+         reviewed_parts TYPE string,
+         finding        TYPE string,
+       END OF ty_alv_naming,
+       tt_alv_naming TYPE STANDARD TABLE OF ty_alv_naming WITH DEFAULT KEY.
+
+*----------------------------------------------------------------------*
+* Class lcl_app DEFINITION
+*----------------------------------------------------------------------*
+CLASS lcl_app DEFINITION FINAL.
+
+  PUBLIC SECTION.
+
+    DATA: g_trkorr             TYPE trkorr,
+          g_t_subtask          TYPE gtt_subtask, " Type defined in top include
+          g_t_units            TYPE gtt_units,   " Type defined in top include
+          g_t_prog_master_unit TYPE tt_master_unit.
+
+    METHODS:
+      constructor,
+
+      extract
+        IMPORTING iv_trkorr      TYPE trkorr
+        RETURNING VALUE(g_t_units) TYPE gtt_units,
+
+      "! Orchestrator: iterates g_t_units, calls call_llm per unit,
+      "! collects responses into ALV table and displays on screen.
+       review_and_display,
+      "! Posts one unit to an OpenAI-compatible /v1/chat/completions
+      "! endpoint and returns the content of the first choice.
+      call_llm
+        IMPORTING iv_url             TYPE string
+                  iv_model           TYPE string
+                  iv_prompt          TYPE string
+                  iv_unit_json       TYPE string
+        RETURNING VALUE(rv_response) TYPE string.
+
+  PRIVATE SECTION.
+
+    METHODS:
+      add_consumed
+        IMPORTING iv_pgmid    TYPE e071-pgmid
+                  iv_object   TYPE e071-object
+                  iv_obj_name TYPE clike
+        CHANGING  ct_consumed TYPE gtt_subtask,
+
+      is_consumed
+        IMPORTING is_row         TYPE gty_subtask
+                  it_consumed    TYPE gtt_subtask
+        RETURNING VALUE(rv_yes)  TYPE abap_bool,
+
+      "==================== R3TR PROG-related =========================
+      handle_prog_standalone
+        CHANGING ct_consumed TYPE gtt_subtask,
+
+      build_prog_master_map
+        CHANGING ct_consumed TYPE gtt_subtask,
+
+      emit_prog_units,
+
+      register_prog_master_as_self
+        IMPORTING ls_row      TYPE gty_subtask
+        CHANGING  ct_consumed TYPE gtt_subtask,
+
+      register_prog_child_include
+        IMPORTING ls_row      TYPE gty_subtask
+                  iv_master   TYPE progname
+        CHANGING  ct_consumed TYPE gtt_subtask,
+
+      build_unit_from_prog_master
+        IMPORTING is_master      TYPE ty_master_unit
+        RETURNING VALUE(rs_unit) TYPE gty_unit,
+
+      "================================================================
+      resolve_master_of_include
+        IMPORTING iv_include       TYPE progname
+        RETURNING VALUE(rv_master) TYPE progname,
+
+      collect_siblings_of_master
+        IMPORTING iv_master         TYPE progname
+        RETURNING VALUE(rt_children) TYPE tt_child_unit,
+
+      get_all_includes_of_master
+        IMPORTING iv_master      TYPE progname
+        EXPORTING et_includes    TYPE prognames,
+
+      read_program_source
+        IMPORTING iv_name          TYPE programm
+        RETURNING VALUE(rv_source) TYPE string,
+
+      serialize_unit
+        IMPORTING is_unit       TYPE gty_unit
+        RETURNING VALUE(rv_json) TYPE string,
+
+      show_alv
+        IMPORTING VALUE(it_alv_coding) TYPE tt_alv_coding
+                  VALUE(it_alv_naming) TYPE tt_alv_naming.
+
+ENDCLASS.
+
+*----------------------------------------------------------------------*
+* Class lcl_app IMPLEMENTATION
+*----------------------------------------------------------------------*
+CLASS lcl_app IMPLEMENTATION.
+
+  METHOD constructor.
+    g_trkorr = p_trkorr.
+
+    SELECT
+      e070~trkorr,
+      e071~pgmid,
+      e071~object,
+      e071~obj_name
+      FROM e070
+      INNER JOIN e071
+        ON e071~trkorr = e070~trkorr
+      WHERE e070~strkorr = @g_trkorr
+      ORDER BY e071~pgmid, e071~object, e071~obj_name
+      INTO TABLE @g_t_subtask.
+
+    IF sy-subrc = 0.
+      DELETE g_t_subtask WHERE object <> 'PROG'.
+    ENDIF.
+
+    SORT g_t_subtask BY pgmid object obj_name.
+    DELETE ADJACENT DUPLICATES FROM g_t_subtask COMPARING pgmid object obj_name.
+
+  ENDMETHOD.
+
+  METHOD extract.
+    DATA lt_consumed TYPE gtt_subtask.
+
+    handle_prog_standalone( CHANGING ct_consumed = lt_consumed ).
+
+    LOOP AT g_t_prog_master_unit ASSIGNING FIELD-SYMBOL(<lfs_master>).
+      DATA(ls_unit) = build_unit_from_prog_master( <lfs_master> ).
+      ls_unit-trkorr = g_trkorr.
+      ls_unit-json = serialize_unit( ls_unit ).
+      APPEND ls_unit TO g_t_units.
+    ENDLOOP.
+
+    g_t_units = g_t_units.
+  ENDMETHOD.
+
+  METHOD review_and_display.
+    DATA: lv_coding_prompt   TYPE string,
+          lv_naming_prompt   TYPE string,
+          lv_coding_response TYPE string,
+          lv_naming_response TYPE string,
+          lv_objects         TYPE string,
+          lt_alv_coding      TYPE tt_alv_coding,
+          lt_alv_naming      TYPE tt_alv_naming,
+          ls_alv_coding      TYPE ty_alv_coding,
+          ls_alv_naming      TYPE ty_alv_naming.
+
+    IF g_t_units IS INITIAL.
+      MESSAGE 'No units found to review.' TYPE 'I'.
+      RETURN.
+    ENDIF.
+
+    lv_coding_prompt = lcl_prompts=>get_code_review_prompt( iv_trkorr = g_trkorr ).
+    lv_naming_prompt = lcl_prompts_naming=>get_naming_review_prompt( iv_trkorr = g_trkorr ).
+
+    LOOP AT g_t_units ASSIGNING FIELD-SYMBOL(<lfs_unit>).
+
+      " --- Build comma-separated list of CODE part names ---
+      CLEAR lv_objects.
+      LOOP AT <lfs_unit>-parts ASSIGNING FIELD-SYMBOL(<lfs_part>)
+        WHERE role = 'CODE'.
+        IF lv_objects IS INITIAL.
+          lv_objects = <lfs_part>-name.
+        ELSE.
+          lv_objects = lv_objects && |, | && <lfs_part>-name.
+        ENDIF.
+      ENDLOOP.
+      UNASSIGN <lfs_part>.
+
+      " --- First LLM call: coding review ---
+      lv_coding_response = call_llm( iv_url       = p_url
+                                     iv_model     = p_model
+                                     iv_prompt    = lv_coding_prompt
+                                     iv_unit_json = <lfs_unit>-json ).
+
+      IF lv_coding_response IS NOT INITIAL.
+        SPLIT lv_coding_response AT cl_abap_char_utilities=>newline
+          INTO TABLE DATA(lt_coding_lines).
+        LOOP AT lt_coding_lines INTO DATA(lv_line).
+          IF lv_line IS INITIAL. CONTINUE. ENDIF.
+          CLEAR ls_alv_coding.
+          ls_alv_coding-trkorr         = g_trkorr.
+          ls_alv_coding-unit_type      = <lfs_unit>-unit_type.
+          ls_alv_coding-object_name    = <lfs_unit>-object_name.
+          ls_alv_coding-reviewed_parts = lv_objects.
+          ls_alv_coding-finding        = lv_line.
+          APPEND ls_alv_coding TO lt_alv_coding.
+        ENDLOOP.
+      ENDIF.
+
+      " --- Second LLM call: naming review ---
+      lv_naming_response = call_llm( iv_url       = p_url
+                                     iv_model     = p_model
+                                     iv_prompt    = lv_naming_prompt
+                                     iv_unit_json = <lfs_unit>-json ).
+
+      IF lv_naming_response IS NOT INITIAL.
+        SPLIT lv_naming_response AT cl_abap_char_utilities=>newline
+          INTO TABLE DATA(lt_naming_lines).
+        LOOP AT lt_naming_lines INTO lv_line.
+          IF lv_line IS INITIAL. CONTINUE. ENDIF.
+          CLEAR ls_alv_naming.
+          ls_alv_naming-trkorr         = g_trkorr.
+          ls_alv_naming-unit_type      = <lfs_unit>-unit_type.
+          ls_alv_naming-object_name    = <lfs_unit>-object_name.
+          ls_alv_naming-reviewed_parts = lv_objects.
+          ls_alv_naming-finding        = lv_line.
+          APPEND ls_alv_naming TO lt_alv_naming.
+        ENDLOOP.
+      ENDIF.
+
+    ENDLOOP.
+
+    show_alv( it_alv_coding = lt_alv_coding
+              it_alv_naming = lt_alv_naming ).
+
+  ENDMETHOD.
+
+  METHOD call_llm.
+    DATA: lo_http     TYPE REF TO if_http_client,
+          lv_req_json TYPE string,
+          lv_resp     TYPE string,
+          lv_status   TYPE i.
+     CLEAR rv_response.
+
+    TYPES: BEGIN OF ty_msg,
+             role    TYPE string,
+             content TYPE string,
+           END OF ty_msg,
+           tt_msg TYPE STANDARD TABLE OF ty_msg WITH DEFAULT KEY,
+           BEGIN OF ty_req,
+             model    TYPE string,
+             messages TYPE tt_msg,
+             stream   TYPE abap_bool,
+           END OF ty_req.
+    DATA(ls_req) = VALUE ty_req(
+      model    = iv_model
+      stream   = abap_false
+      messages = VALUE #(
+        ( role = 'system' content = iv_prompt )
+        ( role = 'user'   content = iv_unit_json )
+      ) ).
+
+    lv_req_json = /ui2/cl_json=>serialize(
+      data        = ls_req
+      compress    = abap_true
+      pretty_name = /ui2/cl_json=>pretty_mode-low_case ).
+
+    cl_http_client=>create_by_url(
+      EXPORTING url    = iv_url
+      IMPORTING client = lo_http
+      EXCEPTIONS argument_not_found = 1
+                 plugin_not_active  = 2
+                 internal_error     = 3
+                 OTHERS             = 4 ).
+
+    IF sy-subrc <> 0 OR lo_http IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lo_http->request->set_method( if_http_request=>co_request_method_post ).
+    lo_http->request->set_content_type( 'application/json' ).
+    " lo_http->request->set_header_field(
+    "   name = 'Authorization' value = 'Bearer YOUR_KEY_HERE' ).
+    lo_http->request->set_cdata( lv_req_json ).
+
+    lo_http->send( EXCEPTIONS OTHERS = 1 ).
+    IF sy-subrc <> 0.
+      lo_http->close( ).
+      RETURN.
+    ENDIF.
+
+    lo_http->receive( EXCEPTIONS OTHERS = 1 ).
+    IF sy-subrc <> 0.
+      lo_http->close( ).
+      RETURN.
+    ENDIF.
+
+    lo_http->response->get_status( IMPORTING code = lv_status ).
+    lv_resp = lo_http->response->get_cdata( ).
+    lo_http->close( ).
+
+    IF lv_status < 200 OR lv_status > 299.
+      RETURN.
+    ENDIF.
+
+    TYPES: BEGIN OF ty_choice,
+             message TYPE ty_msg,
+           END OF ty_choice,
+           tt_choice TYPE STANDARD TABLE OF ty_choice WITH DEFAULT KEY,
+           BEGIN OF ty_resp,
+             choices TYPE tt_choice,
+           END OF ty_resp.
+
+    DATA ls_resp TYPE ty_resp.
+
+    /ui2/cl_json=>deserialize(
+      EXPORTING json        = lv_resp
+                pretty_name = /ui2/cl_json=>pretty_mode-camel_case
+      CHANGING  data        = ls_resp ).
+
+    READ TABLE ls_resp-choices INTO DATA(ls_choice) INDEX 1.
+    IF sy-subrc = 0.
+      rv_response = ls_choice-message-content.
+    ELSE.
+      rv_response = lv_resp.
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD show_alv.
+    DATA: lo_alv     TYPE REF TO cl_salv_table,
+          lo_columns TYPE REF TO cl_salv_columns_table,
+          lo_column  TYPE REF TO cl_salv_column_table,
+          lo_display TYPE REF TO cl_salv_display_settings,
+          lo_funcs   TYPE REF TO cl_salv_functions_list.
+
+    " --- Coding review ALV ---
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING r_salv_table = lo_alv
+          CHANGING  t_table      = it_alv_coding ).
+
+        lo_funcs = lo_alv->get_functions( ).
+        lo_funcs->set_all( abap_true ).
+
+        lo_columns = lo_alv->get_columns( ).
+        lo_columns->set_optimize( abap_true ).
+
+        lo_column ?= lo_columns->get_column( 'TRKORR' ).
+        lo_column->set_long_text( 'Transport' ).
+        lo_column->set_output_length( 12 ).
+
+        lo_column ?= lo_columns->get_column( 'UNIT_TYPE' ).
+        lo_column->set_long_text( 'Unit Type' ).
+        lo_column->set_output_length( 10 ).
+
+        lo_column ?= lo_columns->get_column( 'OBJECT_NAME' ).
+        lo_column->set_long_text( 'Object Name' ).
+        lo_column->set_output_length( 40 ).
+
+        lo_column ?= lo_columns->get_column( 'REVIEWED_PARTS' ).
+        lo_column->set_long_text( 'Reviewed Parts' ).
+        lo_column->set_output_length( 60 ).
+
+        lo_column ?= lo_columns->get_column( 'FINDING' ).
+        lo_column->set_long_text( 'Coding Finding' ).
+        lo_column->set_output_length( 200 ).
+
+        lo_display = lo_alv->get_display_settings( ).
+        lo_display->set_list_header(
+          |Coding Review - TR { p_trkorr } - Model: { p_model }| ).
+
+        lo_alv->display( ).
+
+      CATCH cx_salv_msg
+            cx_salv_not_found
+            cx_salv_data_error
+            cx_salv_existing INTO DATA(lx_salv).
+        MESSAGE lx_salv->get_text( ) TYPE 'E'.
+    ENDTRY.
+
+    " --- Naming review ALV ---
+    TRY.
+        cl_salv_table=>factory(
+          IMPORTING r_salv_table = lo_alv
+          CHANGING  t_table      = it_alv_naming ).
+
+        lo_funcs = lo_alv->get_functions( ).
+        lo_funcs->set_all( abap_true ).
+
+        lo_columns = lo_alv->get_columns( ).
+        lo_columns->set_optimize( abap_true ).
+
+        lo_column ?= lo_columns->get_column( 'TRKORR' ).
+        lo_column->set_long_text( 'Transport' ).
+        lo_column->set_output_length( 12 ).
+
+        lo_column ?= lo_columns->get_column( 'UNIT_TYPE' ).
+        lo_column->set_long_text( 'Unit Type' ).
+        lo_column->set_output_length( 10 ).
+
+        lo_column ?= lo_columns->get_column( 'OBJECT_NAME' ).
+        lo_column->set_long_text( 'Object Name' ).
+        lo_column->set_output_length( 40 ).
+
+        lo_column ?= lo_columns->get_column( 'REVIEWED_PARTS' ).
+        lo_column->set_long_text( 'Reviewed Parts' ).
+        lo_column->set_output_length( 60 ).
+
+        lo_column ?= lo_columns->get_column( 'FINDING' ).
+        lo_column->set_long_text( 'Naming Finding' ).
+        lo_column->set_output_length( 200 ).
+
+        lo_display = lo_alv->get_display_settings( ).
+        lo_display->set_list_header(
+          |Naming Review - TR { p_trkorr } - Model: { p_model }| ).
+
+        lo_alv->display( ).
+
+      CATCH cx_salv_msg
+            cx_salv_not_found
+            cx_salv_data_error
+            cx_salv_existing INTO lx_salv.
+        MESSAGE lx_salv->get_text( ) TYPE 'E'.
+    ENDTRY.
+
+  ENDMETHOD.
+
+*----------------------------------------------------------------------*
+* R3TR PROG - two-phase handler
+*----------------------------------------------------------------------*
+  METHOD handle_prog_standalone.
+    build_prog_master_map( CHANGING ct_consumed = ct_consumed ).
+    emit_prog_units( ).
+  ENDMETHOD.
+
+  METHOD build_prog_master_map.
+    LOOP AT g_t_subtask INTO DATA(ls_row)
+      WHERE pgmid = 'R3TR'
+        AND object = 'PROG'.
+
+      IF is_consumed( is_row = ls_row it_consumed = ct_consumed ) = abap_true.
+        CONTINUE.
+      ENDIF.
+
+      DATA(lv_master) = resolve_master_of_include( CONV #( ls_row-obj_name ) ).
+
+      IF lv_master IS INITIAL.
+        register_prog_master_as_self(
+          EXPORTING ls_row      = ls_row
+          CHANGING  ct_consumed = ct_consumed ).
+      ELSE.
+        register_prog_child_include(
+          EXPORTING ls_row      = ls_row
+                    iv_master   = lv_master
+          CHANGING  ct_consumed = ct_consumed ).
+      ENDIF.
+
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD register_prog_master_as_self.
+    FIELD-SYMBOLS <lfs_master> TYPE ty_master_unit.
+
+    READ TABLE g_t_prog_master_unit ASSIGNING <lfs_master>
+      WITH KEY master = ls_row-obj_name.
+
+    IF sy-subrc <> 0.
+      APPEND VALUE #( master         = ls_row-obj_name
+                       in_tr_master   = abap_true
+                       child_table    = collect_siblings_of_master(
+                                         CONV #( ls_row-obj_name ) ) )
+        TO g_t_prog_master_unit ASSIGNING <lfs_master>.
+    ELSE.
+      <lfs_master>-in_tr_master = abap_true.
+      IF <lfs_master>-child_table IS INITIAL.
+        <lfs_master>-child_table =
+          collect_siblings_of_master( CONV #( ls_row-obj_name ) ).
+      ENDIF.
+    ENDIF.
+
+    add_consumed( EXPORTING iv_pgmid    = ls_row-pgmid
+                            iv_object   = ls_row-object
+                            iv_obj_name = ls_row-obj_name
+                  CHANGING  ct_consumed = ct_consumed ).
+
+  ENDMETHOD.
+
+  METHOD register_prog_child_include.
+    FIELD-SYMBOLS: <lfs_master> TYPE ty_master_unit,
+                   <lfs_child>  TYPE ty_child_unit.
+
+    READ TABLE g_t_prog_master_unit ASSIGNING <lfs_master>
+      WITH KEY master = iv_master.
+
+    IF sy-subrc <> 0.
+      APPEND VALUE #( master      = iv_master
+                       child_table = collect_siblings_of_master( iv_master ) )
+        TO g_t_prog_master_unit ASSIGNING <lfs_master>.
+    ELSEIF <lfs_master>-child_table IS INITIAL.
+      <lfs_master>-child_table = collect_siblings_of_master( iv_master ).
+    ENDIF.
+
+    READ TABLE <lfs_master>-child_table ASSIGNING <lfs_child>
+      WITH KEY child = ls_row-obj_name.
+
+    IF sy-subrc = 0.
+      <lfs_child>-in_tr_child = abap_true.
+    ELSE.
+      APPEND VALUE #( child       = ls_row-obj_name
+                       in_tr_child = abap_true ) TO <lfs_master>-child_table.
+    ENDIF.
+
+    add_consumed( EXPORTING iv_pgmid    = ls_row-pgmid
+                            iv_object   = ls_row-object
+                            iv_obj_name = ls_row-obj_name
+                  CHANGING  ct_consumed = ct_consumed ).
+
+  ENDMETHOD.
+
+  METHOD emit_prog_units.
+    LOOP AT g_t_prog_master_unit ASSIGNING FIELD-SYMBOL(<lfs_master>).
+      DATA(ls_unit) = build_unit_from_prog_master( <lfs_master> ).
+      ls_unit-json = serialize_unit( ls_unit ).
+      APPEND ls_unit TO g_t_units.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD build_unit_from_prog_master.
+    rs_unit-trkorr      = g_trkorr.
+    rs_unit-unit_type   = 'PROG'.
+    rs_unit-object_name = is_master-master.
+    rs_unit-parent      = is_master-master.
+
+    DATA lv_any_child_in_tr TYPE abap_bool VALUE abap_false.
+    LOOP AT is_master-child_table ASSIGNING FIELD-SYMBOL(<lfs_probe>)
+      WHERE in_tr_child = abap_true.
+      lv_any_child_in_tr = abap_true.
+      EXIT.
+    ENDLOOP.
+    UNASSIGN <lfs_probe>.
+
+* Case A: only master in TR -> standalone, master as CODE
+    IF is_master-in_tr_master = abap_true AND lv_any_child_in_tr = abap_false.
+      APPEND VALUE #( name   = is_master-master
+                       role   = 'CODE'
+                       source = read_program_source( is_master-master ) )
+        TO rs_unit-parts.
+      RETURN.
+    ENDIF.
+
+* Cases B and C:
+*   B) master + children in TR -> master=CODE, flagged=CODE, rest=GLOBAL
+*   C) only children in TR     -> master=GLOBAL, flagged=CODE, rest=GLOBAL
+    APPEND VALUE #(
+      name   = is_master-master
+      role   = COND #( WHEN is_master-in_tr_master = abap_true
+                       THEN 'CODE' ELSE 'GLOBAL' )
+      source = read_program_source( is_master-master )
+    ) TO rs_unit-parts.
+
+    LOOP AT is_master-child_table ASSIGNING FIELD-SYMBOL(<lfs_child>).
+      APPEND VALUE #(
+        name   = <lfs_child>-child
+        role   = COND #( WHEN <lfs_child>-in_tr_child = abap_true
+                         THEN 'CODE' ELSE 'GLOBAL' )
+        source = read_program_source( <lfs_child>-child )
+      ) TO rs_unit-parts.
+    ENDLOOP.
+    UNASSIGN <lfs_child>.
+
+  ENDMETHOD.
+
+  METHOD resolve_master_of_include.
+    SELECT SINGLE master FROM d010inc
+      INTO @rv_master
+      WHERE include = @iv_include.
+
+    IF sy-subrc <> 0.
+      CLEAR rv_master.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD collect_siblings_of_master.
+    DATA lt_siblings TYPE prognames.
+
+    get_all_includes_of_master(
+      EXPORTING iv_master   = iv_master
+      IMPORTING et_includes = lt_siblings ).
+
+    rt_children = VALUE #( FOR sib IN lt_siblings
+                           ( child       = sib
+                             in_tr_child = abap_false ) ).
+  ENDMETHOD.
+
+  METHOD get_all_includes_of_master.
+    DATA: lt_to_process TYPE STANDARD TABLE OF progname,
+          lt_seen       TYPE STANDARD TABLE OF progname,
+          lv_current    TYPE progname.
+
+    CLEAR et_includes.
+    APPEND iv_master TO lt_to_process.
+
+    WHILE lines( lt_to_process ) > 0.
+      READ TABLE lt_to_process INTO lv_current INDEX 1.
+      DELETE lt_to_process INDEX 1.
+
+      READ TABLE lt_seen TRANSPORTING NO FIELDS
+        WITH KEY table_line = lv_current.
+      IF sy-subrc = 0.
+        CONTINUE.
+      ENDIF.
+      APPEND lv_current TO lt_seen.
+
+      SELECT d010inc~include
+        FROM d010inc
+        INNER JOIN reposrc
+          ON reposrc~progname = d010inc~include
+        WHERE d010inc~master  = @lv_current
+          AND reposrc~cnam    NOT LIKE 'SAP%'
+          AND reposrc~progname NOT LIKE '%==%'
+        INTO TABLE @DATA(lt_direct).
+
+      LOOP AT lt_direct INTO DATA(ls_inc).
+        APPEND ls_inc-include TO lt_to_process.
+        APPEND ls_inc-include TO et_includes.
+      ENDLOOP.
+    ENDWHILE.
+
+    SORT et_includes.
+    DELETE ADJACENT DUPLICATES FROM et_includes.
+  ENDMETHOD.
+
+  METHOD read_program_source.
+    DATA lt_src TYPE STANDARD TABLE OF string.
+
+    READ REPORT iv_name INTO lt_src.
+    IF sy-subrc = 0.
+      CONCATENATE LINES OF lt_src INTO rv_source
+                  SEPARATED BY cl_abap_char_utilities=>cr_lf.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD serialize_unit.
+    DATA ls_payload LIKE is_unit.
+    ls_payload = is_unit.
+    CLEAR ls_payload-json.
+
+    rv_json = /ui2/cl_json=>serialize(
+      data        = ls_payload
+      compress    = abap_true
+      pretty_name = /ui2/cl_json=>pretty_mode-low_case ).
+  ENDMETHOD.
+
+  METHOD is_consumed.
+    READ TABLE it_consumed TRANSPORTING NO FIELDS
+      WITH KEY pgmid    = is_row-pgmid
+               object   = is_row-object
+               obj_name = is_row-obj_name.
+
+    rv_yes = COND #( WHEN sy-subrc = 0 THEN abap_true ELSE abap_false ).
+  ENDMETHOD.
+
+  METHOD add_consumed.
+    APPEND VALUE #( pgmid    = iv_pgmid
+                     object   = iv_object
+                     obj_name = iv_obj_name ) TO ct_consumed.
+  ENDMETHOD.
+
+ENDCLASS.
